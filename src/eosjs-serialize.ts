@@ -872,6 +872,106 @@ const checkRange = (orig: number, converted: number): number => {
     return +orig;
 };
 
+const serializeAny = (buffer: SerialBuffer, data: any): void => {
+    // blob_type is not supported
+    if (typeof data == 'number') {
+        if (Number.isInteger(data)) {
+            if (Number.isSafeInteger(data)) {
+                if (data < 0) {
+                    // int64_type
+                    buffer.push(1);
+                    buffer.pushArray(numeric.signedDecimalToBinary(8, '' + data));
+                } else {
+                    // uint64_type
+                    buffer.push(2);
+                    buffer.pushArray(numeric.decimalToBinary(8, '' + data));
+                }
+            } else {
+                console.warn('the given integer value exceeds safe precision range, converted to float64');
+                // double_type
+                buffer.push(3);
+                buffer.pushFloat64(data);
+            }
+        } else {
+            // double_type
+            buffer.push(3);
+            buffer.pushFloat64(data);
+        }
+    } else if (typeof data == 'boolean') {
+        // bool_type
+        buffer.push(4);
+        buffer.push(data ? 1 : 0);
+    } else if (typeof data == 'string') {
+        // string_type
+        buffer.push(5);
+        buffer.pushString(data);
+    } else if (Array.isArray(data)) {
+        // array_type
+        let size = data.length;
+        buffer.push(6);
+        buffer.pushVaruint32(checkRange(size, size >>> 0));
+        for (let v of data) {
+            serializeAny(buffer, v);
+        }
+    } else if (typeof data == 'object') {
+        if (!data) {
+            // null_type
+            buffer.push(0);
+        } else {
+            // object_type
+            let size = Object.keys(data).length;
+            buffer.push(7);
+            buffer.pushVaruint32(checkRange(size, size >>> 0));
+            for (let [k, v] of Object.entries(data)) {
+                buffer.pushString(k);
+                serializeAny(buffer, v);
+            }
+        }
+    } else {
+        throw new Error('failed to serialize any type value');
+    }
+};
+
+const deserializeAny = (buffer: SerialBuffer): any => {
+    const type = buffer.get();
+    switch (type) {
+        case 0:
+            return;
+        case 1:
+            return numeric.signedBinaryToDecimal(buffer.getUint8Array(8));
+        case 2:
+            return numeric.binaryToDecimal(buffer.getUint8Array(8));
+        case 3:
+            return buffer.getFloat64();
+        case 4:
+            return !!buffer.get();
+        case 5:
+            return buffer.getString();
+        case 6:
+            {
+                let size = buffer.getVaruint32();
+                let ret = [] as any[];
+                while (size-- > 0) {
+                    ret.push(deserializeAny(buffer));
+                }
+                return ret;
+            }
+        case 7:
+            {
+                let size = buffer.getVaruint32();
+                let ret = [] as any[];
+                while (size-- > 0) {
+                    const key = buffer.getString();
+                    const value = deserializeAny(buffer);
+                    ret.push([key, value]);
+                }
+                return Object.fromEntries(ret);
+            }
+        default:
+            throw new Error('failed to deserialze any type value');
+    }
+};
+
 /** Create the set of types built-in to the abi format */
 export const createInitialTypes = (): Map<string, Type> => {
     const result: Map<string, Type> = new Map(Object.entries({
@@ -1097,6 +1197,13 @@ export const createInitialTypes = (): Map<string, Type> => {
         ],
         serialize: serializeStruct,
         deserialize: deserializeStruct,
+    }));
+
+    result.set('any', createType({
+        name: 'any',
+        builtIn: true,
+        serialize: (buffer: SerialBuffer, data: any) => { serializeAny(buffer, data); },
+        deserialize: (buffer: SerialBuffer) => { return deserializeAny(buffer); },
     }));
 
     return result;
